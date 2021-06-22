@@ -8,3 +8,5 @@ edition = "2018"
 [dependencies]
 anyhow = "1"
 rand = "0.8"
+rodio = "0.14"
+minifb = "0.19"

@@ -1,8 +1,31 @@
 use anyhow::Result;
-use std::convert::TryInto;
 use rand::Rng;
+use std::convert::TryInto;
 use std::fs;
 use std::io::Read;
+use minifb::{Key, Window};
+
+fn index_to_key(ix: u8) -> Key {
+    match ix {
+        0x00 => Key::Key0,
+        0x01 => Key::Key1,
+        0x02 => Key::Key2,
+        0x03 => Key::Key3,
+        0x04 => Key::Key4,
+        0x05 => Key::Key5,
+        0x06 => Key::Key6,
+        0x07 => Key::Key7,
+        0x08 => Key::Key8,
+        0x09 => Key::Key9,
+        0x0A => Key::A,
+        0x0B => Key::B,
+        0x0C => Key::C,
+        0x0D => Key::D,
+        0x0E => Key::E,
+        0x0F => Key::F,
+        _ => panic!("Invalid Key Index: {}", ix),
+    }
+}
 
 pub struct Chip {
     memory: [u8; 0xFFF],
@@ -10,7 +33,7 @@ pub struct Chip {
     address_register: u16,
     program_counter: u16,
     stack: Vec<u16>,
-    screendata: [[u8; 64]; 32],
+    pub screendata: [[u8; 64]; 32],
 }
 
 impl Chip {
@@ -32,11 +55,12 @@ impl Chip {
         Ok(())
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self, window: &Window) {
         // fetch
         let op = ((self.memory[self.program_counter as usize] as u16) << 8)
-            | self.memory[self.program_counter as usize] as u16;
+            | self.memory[self.program_counter as usize + 1] as u16;
         self.program_counter += 2;
+        println!("executing op {:#10x}", op);
 
         // decode & execute
         match op & 0xF000 {
@@ -51,7 +75,7 @@ impl Chip {
                         self.program_counter = self.stack.pop().unwrap();
                     }
                     _ => {
-                        panic!("unimplemented OpCode: {}", op)
+                        panic!("unimplemented OpCode: {:#10x}", op)
                     }
                 }
             }
@@ -146,26 +170,26 @@ impl Chip {
                         let reg_x = ((op & 0x0F00) >> 8) as usize;
                         self.registers[15] = self.registers[reg_x] & 0x0001;
                         self.registers[reg_x] >>= 1;
-                    },
+                    }
                     0x0007 => {
-                        // Sets VX to VY minus VX. VF is set to 0 when there's a borrow, and 1 when there is not. 
+                        // Sets VX to VY minus VX. VF is set to 0 when there's a borrow, and 1 when there is not.
                         let reg_x = ((op & 0x0F00) >> 8) as usize;
                         let reg_y = ((op & 0x00F0) >> 4) as usize;
                         let res = self.registers[reg_y].overflowing_sub(self.registers[reg_x]);
                         self.registers[15] = if res.1 { 0 } else { 1 };
                         self.registers[reg_x] >>= 1;
-                    },
+                    }
                     0x000E => {
                         // Store the most significant bit of VX in VF and shift VX to the left by 1
                         let reg_x = ((op & 0x0F00) >> 8) as usize;
                         self.registers[15] = self.registers[reg_x] & 0x10;
                         self.registers[reg_x] >>= 1;
-                    },
+                    }
                     _ => {
-                        panic!("unimplemented OpCode: {}", op)
+                        panic!("unimplemented OpCode: {:#10x}", op)
                     }
                 }
-            },
+            }
             0x9000 => {
                 // Skips the next instruction if VX does not equal VY
                 let reg_x = ((op & 0x0F00) >> 8) as usize;
@@ -173,22 +197,22 @@ impl Chip {
                 if self.registers[reg_x] != self.registers[reg_y] {
                     self.program_counter += 2;
                 }
-            },
+            }
             0xA000 => {
                 // Set address register to adress NNN
-                self.address_register = op & 0x0FFF;
-            },
+                self.address_register = self.memory[(op & 0x0FFF) as usize] as u16;
+            }
             0xB000 => {
                 // Jump to the adress NNN + V0
                 self.program_counter = self.registers[0] as u16 + op & 0x0FFF
-            },
+            }
             0xC000 => {
-                // Sets VX to the result of a bitwise and operation on a random number (Typically: 0 to 255) and NN. 
+                // Sets VX to the result of a bitwise and operation on a random number (Typically: 0 to 255) and NN.
                 let reg_x = ((op & 0x0F00) >> 8) as usize;
                 let nn: u8 = (op & 0x00FF).try_into().unwrap();
                 let r: u8 = rand::thread_rng().gen();
                 self.registers[reg_x] = nn & r;
-            },
+            }
             0xD000 => {
                 // Draw a sprite at VX, VY with data starting at the address register
                 let reg_x = ((op & 0x0F00) >> 8) as usize;
@@ -205,23 +229,101 @@ impl Chip {
 
                     for bit_ix in 0..8 {
                         let x = x_start + bit_ix;
-                        let mask = 1 << (8 - bit_ix);
+                        let mask = 1 << (7 - bit_ix);
 
                         // only flip the pixel if the corresponding bit is turned on
                         if data & mask != 0 {
                             // check for collisions
-                            if self.screendata[x][y] == 1 {
+                            if self.screendata[y][x] == 1 {
                                 self.registers[15] = 1;
                             }
                             // flip the pixels activation
-                            self.screendata[x][y] ^= 1;
+                            self.screendata[y][x] ^= 1;
                         }
                     }
                 }
-            },
+            }
+            0xE000 => {
+                match op & 0x00FF {
+                    0x009E => {
+                        // Skips the next instruction if the key stored in VX is pressed
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        let k = index_to_key(self.registers[reg_x]);
+                        if window.is_key_down(k) {
+                            self.program_counter += 2;
+                        }
+                    }
+                    0x00A1 => {
+                        // Skips the next instruction if the key stored in VX is not pressed
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        let k = index_to_key(self.registers[reg_x]);
+                        if !window.is_key_down(k) {
+                            self.program_counter += 2;
+                        }
+                    }
+                    _ => {
+                        panic!("unimplemented OpCode: {:#10x}", op)
+                    },
+                }
+            }
+            0xF000 => {
+                match op & 0x00FF {
+                    0x0007 => {
+                        // Set the VX to the delay timer
+                        unimplemented!();
+                    }
+                    0x000A => {
+                        // A key press is awaited, then stored in VX (blocking)
+                        unimplemented!();
+                    }
+                    0x0015 => {
+                        // Set the delay timer to VX
+                        unimplemented!();
+                    }
+                    0x0018 => {
+                        // Set the sound timer to VX
+                        unimplemented!();
+                    }
+                    0x001E => {
+                        // Add VX to I. VF is not affected
+                        unimplemented!();
+                    }
+                    0x0029 => {
+                        // Sets I to the location of the sprite stored in VX
+                        unimplemented!();
+                    }
+                    0x0033 => {
+                        // Stores the binary decimal representation of VX in I
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        let val = self.registers[reg_x];
+
+                        let hundreds = val / 100;
+                        let tens = (val * 10) % 10;
+                        let ones = val % 10;
+                        let base = self.address_register as usize;
+                        
+                        self.registers[base] = hundreds;
+                        self.registers[base + 1] = tens;
+                        self.registers[base + 2] = ones;
+                    }
+                    0x0055 => {
+                        // Stores V0 to VX (including VX) at I
+                        unimplemented!();
+                    }
+                    0x0065 => {
+                        // Read V0 to VX (including VX) from I
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+
+                        for ix in 0..reg_x {
+                            self.registers[ix] = self.memory[self.address_register as usize + ix]
+                        }
+                    }
+                    _ => panic!("unimplemented OpCode: {:#10x}", op),
+                }
+            }
 
             _ => {
-                panic!("unimplemented OpCode: {}", op)
+                panic!("unimplemented OpCode: {:#10x}", op)
             }
         }
     }
