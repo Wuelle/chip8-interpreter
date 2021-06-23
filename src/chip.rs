@@ -1,9 +1,19 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use cpal::{
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    Sample, Stream, StreamConfig,
+};
+use minifb::{Key, Window};
 use rand::Rng;
 use std::convert::TryInto;
 use std::fs;
 use std::io::Read;
-use minifb::{Key, Window};
+
+fn beep(data: &mut [f32], next: &mut dyn FnMut() -> f32) {
+    for sample in data.iter_mut() {
+        *sample = Sample::from(&next());
+    }
+}
 
 fn index_to_key(ix: u8) -> Key {
     match ix {
@@ -33,18 +43,91 @@ pub struct Chip {
     address_register: u16,
     program_counter: u16,
     stack: Vec<u16>,
+    sound_timer: u8,
+    delay_timer: u8,
     pub screendata: [[u8; 64]; 32],
+    stream: Stream,
 }
 
 impl Chip {
     pub fn new() -> Self {
+        let mut memory = [0; 0xFFF];
+        let font = [
+            // 0
+            [0xF0, 0x90, 0x90, 0x90, 0xF0],
+            // 1
+            [0x20, 0x60, 0x20, 0x20, 0x70],
+            // 2
+            [0xF0, 0x10, 0xF0, 0x80, 0xF0],
+            // 3
+            [0xF0, 0x10, 0xF0, 0x10, 0xF0],
+            // 4
+            [0x90, 0x90, 0xF0, 0x10, 0x10],
+            // 5
+            [0xF0, 0x80, 0xF0, 0x10, 0xF0],
+            // 6
+            [0xF0, 0x80, 0xF0, 0x90, 0xF0],
+            // 7
+            [0xF0, 0x10, 0x20, 0x40, 0x40],
+            // 8
+            [0xF0, 0x90, 0xF0, 0x90, 0xF0],
+            // 9
+            [0xF0, 0x90, 0xF0, 0x10, 0xF0],
+            // A
+            [0xF0, 0x90, 0xF0, 0x90, 0x90],
+            // B
+            [0xE0, 0x90, 0xE0, 0x90, 0xE0],
+            // C
+            [0xF0, 0x80, 0x80, 0x80, 0xF0],
+            // D
+            [0xE0, 0x90, 0x90, 0x90, 0xE0],
+            // E
+            [0xF0, 0x80, 0xF0, 0x80, 0xF0],
+            // F
+            [0xF0, 0x80, 0xF0, 0x80, 0x80],
+        ];
+
+        // use the const generic version here
+        for (mem, c) in memory.chunks_exact_mut(5).zip(&font) {
+            for (ix, elem) in mem.iter_mut().enumerate() {
+                *elem = c[ix];
+            }
+        }
+
+        let host = cpal::default_host();
+
+        let device = host
+            .default_output_device()
+            .expect("no output device available");
+
+        let config: StreamConfig = device.default_output_config().unwrap().into();
+
+        // Produce a sinusoid of maximum amplitude.
+        let sample_rate = 4096.;
+        let mut sample_clock = 0.;
+        let mut next_value = move || {
+            sample_clock = (sample_clock + 1.0) % sample_rate;
+            (sample_clock * 15.0 * 2.0 * std::f32::consts::PI / sample_rate).sin()
+        };
+
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| beep(data, &mut next_value),
+                |_e| eprintln!("error!"),
+            )
+            .unwrap();
+
         Self {
-            memory: [0; 0xFFF],
+            memory: memory,
             registers: [0; 16],
             address_register: 0,
             program_counter: 0x200, // everything up to 0x1FF is for the interpreter
             stack: vec![],
+            sound_timer: 1,
+            delay_timer: 0,
             screendata: [[0; 64]; 32],
+            stream: stream,
         }
     }
 
@@ -55,12 +138,12 @@ impl Chip {
         Ok(())
     }
 
-    pub fn step(&mut self, window: &Window) {
+    pub fn step(&mut self, window: &Window) -> Result<()> {
         // fetch
         let op = ((self.memory[self.program_counter as usize] as u16) << 8)
             | self.memory[self.program_counter as usize + 1] as u16;
         self.program_counter += 2;
-        println!("executing op {:#10x}", op);
+        println!("executing op {:#06x}", op);
 
         // decode & execute
         match op & 0xF000 {
@@ -72,7 +155,10 @@ impl Chip {
                     }
                     0x000E => {
                         // return from subroutine
-                        self.program_counter = self.stack.pop().unwrap();
+                        self.program_counter = self
+                            .stack
+                            .pop()
+                            .ok_or(anyhow!("Trying to pop empty Stack"))?;
                     }
                     _ => {
                         panic!("unimplemented OpCode: {:#10x}", op)
@@ -115,13 +201,13 @@ impl Chip {
             0x6000 => {
                 // Set VX to NN
                 let reg_x = ((op & 0x0F00) >> 8) as usize;
-                self.registers[reg_x] = (op & 0x00FF).try_into().unwrap();
+                self.registers[reg_x] = (op & 0x00FF).try_into()?;
             }
             0x7000 => {
                 // Add NN to VX (carry flag is not changed)
                 let reg_x = ((op & 0x0F00) >> 8) as usize;
                 self.registers[reg_x] =
-                    self.registers[reg_x].wrapping_add((op & 0x00FF).try_into().unwrap());
+                    self.registers[reg_x].wrapping_add((op & 0x00FF).try_into()?);
             }
             0x8000 => {
                 match op & 0x000F {
@@ -200,7 +286,7 @@ impl Chip {
             }
             0xA000 => {
                 // Set address register to adress NNN
-                self.address_register = self.memory[(op & 0x0FFF) as usize] as u16;
+                self.address_register = op & 0x0FFF;
             }
             0xB000 => {
                 // Jump to the adress NNN + V0
@@ -209,7 +295,7 @@ impl Chip {
             0xC000 => {
                 // Sets VX to the result of a bitwise and operation on a random number (Typically: 0 to 255) and NN.
                 let reg_x = ((op & 0x0F00) >> 8) as usize;
-                let nn: u8 = (op & 0x00FF).try_into().unwrap();
+                let nn: u8 = (op & 0x00FF).try_into()?;
                 let r: u8 = rand::thread_rng().gen();
                 self.registers[reg_x] = nn & r;
             }
@@ -230,6 +316,8 @@ impl Chip {
                     for bit_ix in 0..8 {
                         let x = x_start + bit_ix;
                         let mask = 1 << (7 - bit_ix);
+                        // println!("mask: {:#08b}", mask);
+                        // println!("matc: {:#08b}", data & mask);
 
                         // only flip the pixel if the corresponding bit is turned on
                         if data & mask != 0 {
@@ -263,34 +351,43 @@ impl Chip {
                     }
                     _ => {
                         panic!("unimplemented OpCode: {:#10x}", op)
-                    },
+                    }
                 }
             }
             0xF000 => {
                 match op & 0x00FF {
                     0x0007 => {
                         // Set the VX to the delay timer
-                        unimplemented!();
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        self.registers[reg_x] = self.delay_timer;
                     }
                     0x000A => {
-                        // A key press is awaited, then stored in VX (blocking)
                         unimplemented!();
+                        // A key press is awaited, then stored in VX (blocking)
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        let key_pressed = false;
+                        while !key_pressed {}
                     }
                     0x0015 => {
                         // Set the delay timer to VX
-                        unimplemented!();
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        self.delay_timer = self.registers[reg_x];
                     }
                     0x0018 => {
                         // Set the sound timer to VX
-                        unimplemented!();
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        self.sound_timer = self.registers[reg_x];
                     }
                     0x001E => {
                         // Add VX to I. VF is not affected
-                        unimplemented!();
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        self.address_register += self.registers[reg_x] as u16;
                     }
                     0x0029 => {
                         // Sets I to the location of the sprite stored in VX
-                        unimplemented!();
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+                        let sprite = self.registers[reg_x] as u16;
+                        self.address_register = 0x000 + 0x005 * sprite
                     }
                     0x0033 => {
                         // Stores the binary decimal representation of VX in I
@@ -301,14 +398,18 @@ impl Chip {
                         let tens = (val * 10) % 10;
                         let ones = val % 10;
                         let base = self.address_register as usize;
-                        
-                        self.registers[base] = hundreds;
-                        self.registers[base + 1] = tens;
-                        self.registers[base + 2] = ones;
+
+                        self.memory[base] = hundreds;
+                        self.memory[base + 1] = tens;
+                        self.memory[base + 2] = ones;
                     }
                     0x0055 => {
                         // Stores V0 to VX (including VX) at I
-                        unimplemented!();
+                        let reg_x = ((op & 0x0F00) >> 8) as usize;
+
+                        for ix in 0..reg_x {
+                            self.memory[self.address_register as usize + ix] = self.registers[ix];
+                        }
                     }
                     0x0065 => {
                         // Read V0 to VX (including VX) from I
@@ -326,5 +427,22 @@ impl Chip {
                 panic!("unimplemented OpCode: {:#10x}", op)
             }
         }
+
+        // Decrement and handle timers
+        if self.sound_timer != 0 {
+            self.stream.play()?;
+
+            self.sound_timer -= 1;
+
+            if self.sound_timer == 0 {
+                self.stream.pause()?;
+            }
+        }
+
+        if self.delay_timer != 0 {
+            self.delay_timer -= 1;
+        }
+
+        Ok(())
     }
 }
