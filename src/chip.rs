@@ -17,22 +17,22 @@ fn beep(data: &mut [f32], next: &mut dyn FnMut() -> f32) {
 
 fn index_to_key(ix: u8) -> Key {
     match ix {
-        0x00 => Key::Key0,
+        0x00 => Key::X,
         0x01 => Key::Key1,
         0x02 => Key::Key2,
         0x03 => Key::Key3,
-        0x04 => Key::Key4,
-        0x05 => Key::Key5,
-        0x06 => Key::Key6,
-        0x07 => Key::Key7,
-        0x08 => Key::Key8,
-        0x09 => Key::Key9,
-        0x0A => Key::A,
-        0x0B => Key::B,
-        0x0C => Key::C,
-        0x0D => Key::D,
-        0x0E => Key::E,
-        0x0F => Key::F,
+        0x04 => Key::Q,
+        0x05 => Key::W,
+        0x06 => Key::E,
+        0x07 => Key::A,
+        0x08 => Key::S,
+        0x09 => Key::D,
+        0x0A => Key::Y,
+        0x0B => Key::C,
+        0x0C => Key::Key4,
+        0x0D => Key::R,
+        0x0E => Key::F,
+        0x0F => Key::V,
         _ => panic!("Invalid Key Index: {}", ix),
     }
 }
@@ -43,10 +43,10 @@ pub struct Chip {
     address_register: u16,
     program_counter: u16,
     stack: Vec<u16>,
-    sound_timer: u8,
-    delay_timer: u8,
+    pub sound_timer: u8,
+    pub delay_timer: u8,
     pub screendata: [[u8; 64]; 32],
-    stream: Stream,
+    pub stream: Stream,
 }
 
 impl Chip {
@@ -143,7 +143,7 @@ impl Chip {
         let op = ((self.memory[self.program_counter as usize] as u16) << 8)
             | self.memory[self.program_counter as usize + 1] as u16;
         self.program_counter += 2;
-        println!("executing op {:#06x}", op);
+        // println!("executing op {:#06x}", op);
 
         // decode & execute
         match op & 0xF000 {
@@ -427,22 +427,6 @@ impl Chip {
                 panic!("unimplemented OpCode: {:#10x}", op)
             }
         }
-
-        // Decrement and handle timers
-        if self.sound_timer != 0 {
-            self.stream.play()?;
-
-            self.sound_timer -= 1;
-
-            if self.sound_timer == 0 {
-                self.stream.pause()?;
-            }
-        }
-
-        if self.delay_timer != 0 {
-            self.delay_timer -= 1;
-        }
-
         Ok(())
     }
 }
