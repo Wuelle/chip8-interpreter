@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
+    traits::{DeviceTrait, HostTrait},
     Sample, Stream, StreamConfig,
 };
 use minifb::{Key, Window};
@@ -143,7 +143,6 @@ impl Chip {
         let op = ((self.memory[self.program_counter as usize] as u16) << 8)
             | self.memory[self.program_counter as usize + 1] as u16;
         self.program_counter += 2;
-        // println!("executing op {:#06x}", op);
 
         // decode & execute
         match op & 0xF000 {
@@ -316,17 +315,17 @@ impl Chip {
                     for bit_ix in 0..8 {
                         let x = x_start + bit_ix;
                         let mask = 1 << (7 - bit_ix);
-                        // println!("mask: {:#08b}", mask);
-                        // println!("matc: {:#08b}", data & mask);
 
-                        // only flip the pixel if the corresponding bit is turned on
-                        if data & mask != 0 {
-                            // check for collisions
-                            if self.screendata[y][x] == 1 {
-                                self.registers[15] = 1;
+                        if x < 64 && y < 32 {
+                            // only flip the pixel if the corresponding bit is turned on
+                            if data & mask != 0 {
+                                // check for collisions
+                                if self.screendata[y][x] == 1 {
+                                    self.registers[15] = 1;
+                                }
+                                // flip the pixels activation
+                                self.screendata[y][x] ^= 1;
                             }
-                            // flip the pixels activation
-                            self.screendata[y][x] ^= 1;
                         }
                     }
                 }
@@ -395,7 +394,7 @@ impl Chip {
                         let val = self.registers[reg_x];
 
                         let hundreds = val / 100;
-                        let tens = (val * 10) % 10;
+                        let tens = (val / 10) % 10;
                         let ones = val % 10;
                         let base = self.address_register as usize;
 
